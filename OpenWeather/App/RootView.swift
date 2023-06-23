@@ -21,7 +21,7 @@ struct RootView: View {
     enum Tab {
         case home
         case search
-        case summary
+        case favorites
         case profile
     }
 
@@ -30,11 +30,13 @@ struct RootView: View {
     var body: some View {
         TabView(selection: $navigation.tab) {
             OpenBytesNavigationView(path: navigation.home) {
-                // TODO: Update to Production
                 HomeScreen(
                     viewModel: HomeViewModel(
-                        weatherProviding: MockWeatherProvider(),
-                        locationProviding: MockLocationProvider()
+                        capabilities: .init(
+                            locationProviding: LocationProvider(),
+                            weatherProviding: OpenWeatherMapWeatherProvider()
+                        ),
+                        input: .init()
                     )
                 )
             }
@@ -45,30 +47,38 @@ struct RootView: View {
             }
 
             OpenBytesNavigationView(path: navigation.search) {
-                // TODO: Update to Production
                 SearchLocationScreen(
-                    viewModel: SearchLocationViewModel()
+                    viewModel: .init(
+                        capabilities: .init(
+                            locationProviding: LocationProvider(),
+                            databaseService: SQLiteDatabaseService.shared
+                        ),
+                        input: .init()
+                    )
                 )
             }
             .tag(Tab.search)
             .tabItem {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: "location.magnifyingglass")
                 Text("Search")
             }
 
-            OpenBytesNavigationView(path: navigation.summary) {
-                // TODO: Update to Production
-                SummaryScreen(
-                    viewModel: SummaryViewModel(
-                        weatherProviding: MockWeatherProvider(),
-                        locationProviding: MockLocationProvider()
+            OpenBytesNavigationView(path: navigation.favorites) {
+                FavoritesScreen(
+                    viewModel: .init(
+                        capabilities: .init(
+                            locationProviding: LocationProvider(),
+                            weatherProviding: OpenWeatherMapWeatherProvider(),
+                            databaseService: SQLiteDatabaseService.shared
+                        ),
+                        input: .init()
                     )
                 )
             }
-            .tag(Tab.summary)
+            .tag(Tab.favorites)
             .tabItem {
-                Image(systemName: "cloud.fog.circle")
-                Text("Summary")
+                Image(systemName: "heart")
+                Text("Favorites")
             }
 
             OpenBytesNavigationView(path: navigation.profile) {

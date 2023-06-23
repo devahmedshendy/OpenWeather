@@ -10,7 +10,65 @@ import ViewModel
 import Foundation
 import CoreLocation
 
-final class SearchLocationViewModel: ViewModel<SearchLocationCapabilities, SearchLocationViewModel.Input, SearchLocationViewModel.Content> {
+final class SearchLocationViewModel: ViewModel<
+    SearchLocationViewModel.Capabilities,
+    SearchLocationViewModel.Input,
+    SearchLocationViewModel.Content
+> {
+    struct Capabilities {
+        static var mock: Capabilities {
+            .init(
+                locationProviding: MockLocationProvider(),
+                databaseService: MockDatabaseService()
+            )
+        }
+
+        private var locationProviding: LocationProviding
+        private var databaseService: DatabaseService
+
+        init(
+            locationProviding: LocationProviding,
+            databaseService: DatabaseService
+        ) {
+            self.locationProviding = locationProviding
+            self.databaseService = databaseService
+        }
+
+        func getLocationsPublisher(query: String) async throws -> AnyPublisher<[DeviceLocation], Error> {
+            var locations = try await locationProviding.locations(for: query)
+
+            if Task.isCancelled {
+                return Empty<[DeviceLocation], Error>()
+                    .eraseToAnyPublisher()
+            }
+
+            return databaseService
+                .fetchAllFavoritesPublisher(matching: locations)
+                .map { favorites in
+                    for index in locations.indices {
+                        locations[index].isFavorite = favorites.contains(locations[index])
+                    }
+
+                    return locations
+                }
+                .eraseToAnyPublisher()
+        }
+
+        func toggleFavorite(for location: DeviceLocation) async throws -> DeviceLocation {
+            var updated = location
+            if try await databaseService.favoriteExists(updated) {
+                try await databaseService.deleteOneFavorite(updated)
+                updated.isFavorite = false
+
+            } else {
+                try await databaseService.insertOneFavorite(updated)
+                updated.isFavorite = true
+            }
+
+            return updated
+        }
+    }
+
     struct Input: Equatable {
         var searchText: String = ""
     }
@@ -19,14 +77,18 @@ final class SearchLocationViewModel: ViewModel<SearchLocationCapabilities, Searc
         var result: [DeviceLocation]
     }
 
+    static var mock: SearchLocationViewModel {
+        .init(capabilities: .mock, input: .init())
+    }
+
     override var input: Input {
         didSet {
             guard input != oldValue else { return }
-            
+
             searchSubject.send(input.searchText)
         }
     }
-    
+
     override var content: Content {
         Content(result: result)
     }
@@ -35,11 +97,15 @@ final class SearchLocationViewModel: ViewModel<SearchLocationCapabilities, Searc
     private let searchSubject: CurrentValueSubject<String, Never> = CurrentValueSubject("")
 
     private var searchTask: Task<Void, Never>?
+    private var toggleFavoriteTask: Task<Void, Never>?
     private var searchSubscription: AnyCancellable?
+    private var locationsSubscription: AnyCancellable?
 
     @Published private var result: [DeviceLocation] = []
 
     init(
+        capabilities: Capabilities,
+        input: Input,
         errorHandler: ErrorHandler = ErrorHandler(
             plugins: [
                 ToastErrorPlugin()
@@ -48,54 +114,55 @@ final class SearchLocationViewModel: ViewModel<SearchLocationCapabilities, Searc
     ) {
         self.errorHandler = errorHandler
 
-        super.init(
-            capabilities: .init(
-                locationProviding: MockLocationProvider()
-            ),
-            input: .init()
-        )
-        
+        super.init(capabilities: capabilities, input: input)
+
+        observeSearchKeywords()
+    }
+
+    private func observeSearchKeywords() {
         searchSubscription = searchSubject
             .removeDuplicates()
             .debounce(for: 0.300, scheduler: RunLoop.main)
-            .sink { [weak self] searchText in
-                self?.getLocations(searchText: searchText)
-            }
+            .sink(receiveValue: onSearchKeyboard(_:))
     }
 
-    private func getLocations(searchText: String) {
-        searchTask?.cancel()
+    private func onSearchKeyboard(_ keyword: String) {
+        guard keyword.isEmpty == false else {
+            self.result = []
+            return
+        }
 
-        searchTask = Task {
-            do {
-                guard searchTask?.isCancelled == false else { return }
+        Task {
+            locationsSubscription?.cancel()
 
-                let result = try await capabilities.getLocations(query: searchText)
-
-                guard searchTask?.isCancelled == false else { return }
-
-                await MainActor.run {
+            locationsSubscription = try await self.capabilities.getLocationsPublisher(
+                query: keyword
+            )
+            .receive(on: RunLoop.main)
+            .sink(
+                receiveCompletion: { _ in },
+                receiveValue: { result in
                     self.result = result
+                }
+            )
+        }
+    }
+
+    func toggleFavorite(for location: DeviceLocation) {
+        toggleFavoriteTask?.cancel()
+
+        toggleFavoriteTask = Task {
+            do {
+                let updated = try await capabilities.toggleFavorite(for: location)
+
+                if let index = self.result.firstIndex(of: updated) {
+                    await MainActor.run {
+                        self.result[index] = updated
+                    }
                 }
             } catch {
                 errorHandler.handle(error: error)
             }
         }
-    }
-}
-
-protocol SearchLocationCapable {
-    func getLocations(query: String) async throws -> [DeviceLocation]
-}
-
-final class SearchLocationCapabilities: SearchLocationCapable {
-    private var locationProviding: LocationProviding
-
-    init(locationProviding: LocationProviding) {
-        self.locationProviding = locationProviding
-    }
-
-    func getLocations(query: String) async throws -> [DeviceLocation] {
-        try await locationProviding.locations(for: query)
     }
 }
